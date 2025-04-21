@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Secure Video Chat</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #121212; color: white; }
+    video { width: 45%; max-width: 640px; border: 2px solid white; border-radius: 10px; }
+    #videos { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; background: black; padding: 10px; }
+    #loginScreen, #chatScreen, #changePassScreen { display: none; }
+    input, button { margin: 5px; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Video Chat with Face Authentication</h1>
+
+  <!-- Login Screen -->
+  <div id="loginScreen">
+    <input id="userId" placeholder="User ID"><br>
+    <input id="password" type="password" placeholder="Password"><br>
+    <button onclick="login()">Login</button>
+  </div>
+
+  <!-- Face Auth -->
+  <div id="faceAuth" style="display:none;">
+    <p>Face authentication in progress...</p>
+    <video id="authCam" autoplay muted></video>
+  </div>
+
+  <!-- Chat Screen -->
+  <div id="chatScreen">
+    <button onclick="startCall()">Start Call</button>
+    <button onclick="goFullScreen()">Full Screen</button>
+    <button onclick="showChangePass()">Change Password</button>
+    <div id="videos">
+      <video id="localVideo" autoplay muted></video>
+      <video id="remoteVideo" autoplay></video>
+    </div>
+  </div>
+
+  <!-- Change Password Screen -->
+  <div id="changePassScreen">
+    <input id="oldPass" type="password" placeholder="Current Password"><br>
+    <input id="newPass" type="password" placeholder="New Password"><br>
+    <button onclick="changePassword()">Update Password</button>
+    <button onclick="backToChat()">Cancel</button>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+  <script>
+    const socket = io();
+    let localStream;
+    let pc = new RTCPeerConnection();
+    let userId;
+
+    // Show login on load
+    document.getElementById("loginScreen").style.display = "block";
+
+    // Login with ID + password
+    function login() {
+      userId = document.getElementById("userId").value;
+      const password = document.getElementById("password").value;
+      socket.emit("login", { userId, password }, (res) => {
+        if (res.success) {
+          startFaceAuth();
+        } else {
+          alert("Invalid login");
+        }
+      });
+    }
+
+    // Face authentication
+    async function startFaceAuth() {
+      document.getElementById("loginScreen").style.display = "none";
+      document.getElementById("faceAuth").style.display = "block";
+
+      await faceapi.nets.tinyFaceDetector.loadFromUri("models/");
+
+      const video = document.getElementById("authCam");
+      navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+        video.srcObject = stream;
+      });
+
+      const interval = setInterval(async () => {
+        const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions());
+        if (detections) {
+          clearInterval(interval);
+          video.srcObject.getTracks().forEach(t => t.stop());
+          document.getElementById("faceAuth").style.display = "none";
+          document.getElementById("chatScreen").style.display = "block";
+          initVideoChat();
+        }
+      }, 1000);
+    }
+
+    // Video Chat Setup
+    async function initVideoChat() {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.ontrack = event => {
+        document.getElementById("remoteVideo").srcObject = event.streams[0];
+      };
+
+      socket.on("offer", async (offer) => {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("answer", answer);
+      });
+
+      socket.on("answer", async (answer) => {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      });
+
+      socket.on("ice-candidate", candidate => {
+        pc.addIceCandidate(new RTCIceCandidate(candidate));
+      });
+
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          socket.emit("ice-candidate", event.candidate);
+        }
+      };
+    }
+
+    // Start Call
+    async function startCall() {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("offer", offer);
+    }
+
+    // Fullscreen
+    function goFullScreen() {
+      const elem = document.getElementById("videos");
+      if (elem.requestFullscreen) elem.requestFullscreen();
+      else if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
+      else if (elem.msRequestFullscreen) elem.msRequestFullscreen();
+    }
+
+    // Change Password UI
+    function showChangePass() {
+      document.getElementById("chatScreen").style.display = "none";
+      document.getElementById("changePassScreen").style.display = "block";
+    }
+
+    function backToChat() {
+      document.getElementById("changePassScreen").style.display = "none";
+      document.getElementById("chatScreen").style.display = "block";
+    }
+
+    function changePassword() {
+      const oldPass = document.getElementById("oldPass").value;
+      const newPass = document.getElementById("newPass").value;
+      socket.emit("change-password", { userId, oldPass, newPass }, (res) => {
+        if (res.success) {
+          alert("Password changed.");
+          backToChat();
+        } else {
+          alert(res.message || "Change failed.");
+        }
+      });
+    }
+  </script>
+</body>
+</html>
